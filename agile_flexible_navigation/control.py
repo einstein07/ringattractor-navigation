@@ -14,6 +14,8 @@ import numpy as np
 import math
 import time 
 import json
+from ament_index_python.packages import get_package_share_directory
+import os
 #======================define motor control=========================
 # This code is for controlling a robot car using a Raspberry Pi and Adafruit PCA9685
 # It uses GPIO pins to control the direction of the motors and the PCA9685 to control the speed of the motors.
@@ -101,14 +103,21 @@ def quaternion_to_yaw(w, x_rot, y_rot, z_rot):
     yaw = math.atan2(2.0 * (w * z_rot + x_rot * y_rot), 1.0 - 2.0 * (y_rot**2 + z_rot**2))
     return yaw
 #======================define parameters=============================
-with open("parameters.json", 'r') as f:
+package_name = 'agile_flexible_navigation'
+
+param_file = os.path.join(
+    get_package_share_directory(package_name),
+    'parameters.json'
+)
+
+with open(param_file, 'r') as f:
     parameters = json.load(f)
 
 class Options():
     def __init__(self):
         self.corner1 = (float(parameters["corner1"][0]), float(parameters["corner1"][1]))  # limit moving area x, y
         self.corner2 = (float(parameters["corner2"][0]), float(parameters["corner2"][1]))
-        self.rot_index = int(parameters["rot_index"])  # message index of rotation angle
+        #self.rot_index = int(parameters["rot_index"])  # message index of rotation angle
         self.update_time = float(parameters["update_time"])  # time for updating current position in seconds
         self.minimal_dist = float(parameters["minimal_dist"])  # distance defining two car too close
         self.away_scale = float(parameters["away_scale"])  # amount of going away when two cars are too close
