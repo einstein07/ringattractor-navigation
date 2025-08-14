@@ -6,5 +6,5 @@
     "minimal_dist": 1.0,
     "away_scale": 0.8,
     "angular_speed": 2.5,
-    "rotate_scale": 1.2
+    "rotate_scale": 0.1
 }
