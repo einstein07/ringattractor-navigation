@@ -16,6 +16,8 @@ import time
 import json
 from ament_index_python.packages import get_package_share_directory
 import os
+import threading
+
 #======================define motor control=========================
 # This code is for controlling a robot car using a Raspberry Pi and Adafruit PCA9685
 # It uses GPIO pins to control the direction of the motors and the PCA9685 to control the speed of the motors.
@@ -115,6 +117,7 @@ with open(param_file, 'r') as f:
 
 class Options():
     def __init__(self):
+        self.id = parameters["id"]
         self.corner1 = (float(parameters["corner1"][0]), float(parameters["corner1"][1]))  # limit moving area x, y
         self.corner2 = (float(parameters["corner2"][0]), float(parameters["corner2"][1]))
         #self.rot_index = int(parameters["rot_index"])  # message index of rotation angle
@@ -127,7 +130,10 @@ class Options():
 opt = Options()
 
 #======================define global pose variable=========================
-pos_message = {}
+
+pos_message_g = {}
+pos_lock = threading.Lock()
+
 
 #======================define vicon receiver node=========================
 
@@ -146,7 +152,7 @@ class ViconSubscriber(Node):
         self.y_span = abs(self.y_high - self.y_low)
 
         # Identification name of this subject as given on vicon tracking system
-        self.id = ""
+        self.id = opt.id
         """Stores the current position of the robot. As specified in the vicon_receiver.msg.Position message:
         x_trans: x translation in meters
         y_trans: y translation in meters
@@ -176,143 +182,148 @@ class ViconSubscriber(Node):
         # next_y = self.map_position(next_y)
         next_x, next_y = self.map_position(next_x, next_y)
 
-        self.move_to(next_x, next_y)
+        # Start movement in a separate thread so callbacks aren't blocked
+        threading.Thread(target=self.move_to, args=(next_x, next_y), daemon=True).start()
 
     def listener_callback(self, msg):
-        for i in range(msg.n):
-            if msg.positions[i].subject_name == self.id:
-                # Update the current position with the received data
-                self.current_position = msg.positions[i]
-                pos_message['self'] = (float(msg.positions[i].x_trans), float(msg.positions[i].y_trans), float(quaternion_to_yaw(
-                    msg.positions[i].w, 
-                    msg.positions[i].x_rot, 
-                    msg.positions[i].y_rot, 
-                    msg.positions[i].z_rot)))
-            else:
-                pos_message[msg.positions[i].subject_name] = (float(msg.positions[i].x_trans), float(msg.positions[i].y_trans), float(quaternion_to_yaw(
-                    msg.positions[i].w, 
-                    msg.positions[i].x_rot, 
-                    msg.positions[i].y_rot, 
-                    msg.positions[i].z_rot)))
+        with pos_lock:
+            global pos_message_g 
+            pos_message_g= {}
+            for i in range(msg.n):
+                if msg.positions[i].subject_name == self.id:
+                    # Update the current position with the received data
+                    self.current_position = msg.positions[i]
+                    pos_message_g['self'] = (float(msg.positions[i].x_trans), float(msg.positions[i].y_trans), float(quaternion_to_yaw(
+                        msg.positions[i].w, 
+                        msg.positions[i].x_rot, 
+                        msg.positions[i].y_rot, 
+                        msg.positions[i].z_rot)))
+                else:
+                    pos_message_g[msg.positions[i].subject_name] = (float(msg.positions[i].x_trans), float(msg.positions[i].y_trans), float(quaternion_to_yaw(
+                        msg.positions[i].w, 
+                        msg.positions[i].x_rot, 
+                        msg.positions[i].y_rot, 
+                        msg.positions[i].z_rot)))
                 
-            self.get_logger().info('subject "%s" with segment %s:' %(msg.positions[i].subject_name, msg.positions[i].segment_name))
-            self.get_logger().info('I heard translation in x, y, z: "%f", "%f", "%f"' % (msg.positions[i].x_trans, msg.positions[i].y_trans, msg.positions[i].z_trans))
-            self.get_logger().info('I heard rotation in x, y, z, w: "%f", "%f", "%f", "%f": ' % (msg.positions[i].x_rot, msg.positions[i].y_rot, msg.positions[i].z_rot, msg.positions[i].w))
+            #self.get_logger().info('subject "%s" with segment %s:' %(msg.positions[i].subject_name, msg.positions[i].segment_name))
+            #self.get_logger().info('I heard translation in x, y, z: "%f", "%f", "%f"' % (msg.positions[i].x_trans, msg.positions[i].y_trans, msg.positions[i].z_trans))
+            #self.get_logger().info('I heard rotation in x, y, z, w: "%f", "%f", "%f", "%f": ' % (msg.positions[i].x_rot, msg.positions[i].y_rot, msg.positions[i].z_rot, msg.positions[i].w))
 
     
     #======================define move_to function=========================
     def move_to(self, next_x, next_y, sleep_time=None):
-        global pos_message
+        global pos_message_g
 
         goal_message = Pose()
         goal_message.x = float(next_x)
         goal_message.y = float(next_y)
 
+        with pos_lock:
+            if len(pos_message_g.keys()) == 0:
+                print("position not received")
+                return
+            pos_message = pos_message_g.copy()  # Create a copy to avoid issues with concurrent access
 
-        if len(pos_message.keys()) == 0:
-            print("position not received")
-            return
+        target_vec = (next_x - pos_message['self'][0], next_y - pos_message['self'][1])
+
+        target_dist = math.sqrt( (next_x - pos_message['self'][0]) ** 2 \
+                                + (next_y - pos_message['self'][1]) ** 2 )
+
+        # check if it's angular or radius
+        target_angle = np.sign(target_vec[1]) * \
+                        math.acos(target_vec[0] / target_dist)
+        target_angle = target_angle * 180 / np.pi
+
+        angle_to_move = -angle_diff(pos_message['self'][2], target_angle)
+        start_angle = pos_message['self'][2]
+
+        print(f"target angle: {target_angle}, current angle: {pos_message['self'][2]}, angle to move: {angle_to_move}")
+        if type(angle_to_move) is type(np.array([0])):
+            angle_to_move = angle_to_move[0]
         else:
-            target_vec = (next_x - pos_message['self'][0], next_y - pos_message['self'][1])
+            angle_to_move = angle_to_move
 
-            target_dist = math.sqrt( (next_x - pos_message['self'][0]) ** 2 \
-                                    + (next_y - pos_message['self'][1]) ** 2 )
+        # rotate
+        if angle_to_move > 0:
+            rot_l, rot_r = calculate_speed(0, opt.angular_speed) # self.speed_rk.solve_rotate_reverse(np.pi * 2)
+        else:
+            rot_l, rot_r = calculate_speed(0, -opt.angular_speed) # self.speed_rk.solve_rotate_reverse(-np.pi * 2)
 
-            # check if it's angular or radius
-            target_angle = np.sign(target_vec[1]) * \
-                            math.acos(target_vec[0] / target_dist)
-            target_angle = target_angle * 180 / np.pi
+        #rot_l, rot_r = 1500, -2000
+        ## set wheel speed
+        rot_l, rot_r = int(rot_l), int(rot_r)
+        one_round = 360 / opt.angular_speed - opt.rotate_scale
 
-            angle_to_move = -angle_diff(pos_message['self'][2], target_angle)
-            start_angle = pos_message['self'][2]
+        # move_time = abs(angle_to_move / opt.angular_speed)
+        move_time = abs(angle_to_move / 360 * one_round) + 1
+        custom_speed(rot_l, rot_r)
 
-            print(f"target angle: {target_angle}, current angle: {pos_message['self'][2]}, angle to move: {angle_to_move}")
-            if type(angle_to_move) is type(np.array([0])):
-                angle_to_move = angle_to_move[0]
-            else:
-                angle_to_move = angle_to_move
+        # time.sleep(move_time + opt.rotate_scale * (360 / opt.angular_speed)) # 1.22  # wait for rotate while let other thread run
+        # time.sleep(move_time)
+        time.sleep(opt.rotate_scale)
 
-            # rotate
-            if angle_to_move > 0:
-                rot_l, rot_r = calculate_speed(0, opt.angular_speed) # self.speed_rk.solve_rotate_reverse(np.pi * 2)
-            else:
-                rot_l, rot_r = calculate_speed(0, -opt.angular_speed) # self.speed_rk.solve_rotate_reverse(-np.pi * 2)
+        while abs(angle_diff(pos_message['self'][2], target_angle)) > 5:
+            # print(f"current angle {pos_message['self'][2]}, target: {target_angle}, diff {angle_diff(pos_message['self'][2], target_angle)}")
+            time.sleep(opt.update_time)
 
-            #rot_l, rot_r = 1500, -2000
-            ## set wheel speed
-            rot_l, rot_r = int(rot_l), int(rot_r)
-            one_round = 360 / opt.angular_speed - opt.rotate_scale
+        # stop car
+        stopcar()
 
-            # move_time = abs(angle_to_move / opt.angular_speed)
-            move_time = abs(angle_to_move / 360 * one_round) + 1
-            custom_speed(rot_l, rot_r)
+        print(f"angle moved: {angle_diff(pos_message['self'][2], start_angle)}")
 
-            # time.sleep(move_time + opt.rotate_scale * (360 / opt.angular_speed)) # 1.22  # wait for rotate while let other thread run
-            # time.sleep(move_time)
-            time.sleep(opt.rotate_scale)
+        # translate
+#            lin_l = self.speed_rk.solve_speed_reverse("left", 500)
+#            lin_r = self.speed_rk.solve_speed_reverse("right", 500)
 
-            while abs(angle_diff(pos_message['self'][2], target_angle)) > 5:
-                # print(f"current angle {pos_message['self'][2]}, target: {target_angle}, diff {angle_diff(pos_message['self'][2], target_angle)}")
-                time.sleep(opt.update_time)
+        lin_l, lin_r = calculate_speed(400,0)
+        #lin_l, lin_r = 2000, 2500 4
+        ## set wheel speed
+        lin_l, lin_r = int(lin_l), int(lin_r)
+        move_time = target_dist / 400.
+        custom_speed(lin_l, lin_r)
 
-            # stop car
-            stopcar()
+        turn_back = False
+        # wait for move while let other thread run
+        # time.sleep(move_time)  
+        if sleep_time is not None:
+            time.sleep(sleep_time)
+            move_time = max(move_time - sleep_time, 0)
 
-            print(f"angle moved: {angle_diff(pos_message['self'][2], start_angle)}")
+        for i in range(int(move_time / opt.update_time)):
+            time.sleep(opt.update_time)
+            # global pos_message
+            near_dist, near_pos, near_key = self.calculate_near(pos_message)
+            
+            self_x, self_y = pos_message['self'][0], pos_message['self'][1]
 
-            # translate
-    #            lin_l = self.speed_rk.solve_speed_reverse("left", 500)
-    #            lin_r = self.speed_rk.solve_speed_reverse("right", 500)
+            # print(f"nearst car: {near_key}, dist {near_dist}")
 
-            lin_l, lin_r = calculate_speed(400,0)
-            #lin_l, lin_r = 2000, 2500 4
-            ## set wheel speed
-            lin_l, lin_r = int(lin_l), int(lin_r)
-            move_time = target_dist / 400.
-            custom_speed(lin_l, lin_r)
+            if self.close_to_border(self_x, self_y):
 
-            turn_back = False
-            # wait for move while let other thread run
-            # time.sleep(move_time)  
-            if sleep_time is not None:
-                time.sleep(sleep_time)
-                move_time = max(move_time - sleep_time, 0)
+                print(f"close to border {self_x} {self_y}")
+                turn_back = True
+                next_x, next_y = self.center
+                break
+            # avoid hitting another car
+            elif near_dist < opt.minimal_dist:
+                print(f"cars too close")
+                print(f"nearst car: {near_key}, dist {near_dist}")
+                turn_back = True
+                other_x, other_y = near_pos
 
-            for i in range(int(move_time / opt.update_time)):
-                time.sleep(opt.update_time)
-                # global pos_message
-                near_dist, near_pos, near_key = self.calculate_near(pos_message)
-                
-                self_x, self_y = pos_message['self'][0], pos_message['self'][1]
+                next_x = self_x + opt.away_scale * (self_x - other_x)
+                next_y = self_y + opt.away_scale * (self_y - other_y)
+                break
 
-                # print(f"nearst car: {near_key}, dist {near_dist}")
+        # stop car
+        stopcar()
 
-                if self.close_to_border(self_x, self_y):
+        pos_message = {}
 
-                    print(f"close to border {self_x} {self_y}")
-                    turn_back = True
-                    next_x, next_y = self.center
-                    break
-                # avoid hitting another car
-                elif near_dist < opt.minimal_dist:
-                    print(f"cars too close")
-                    print(f"nearst car: {near_key}, dist {near_dist}")
-                    turn_back = True
-                    other_x, other_y = near_pos
+        time.sleep(1)
 
-                    next_x = self_x + opt.away_scale * (self_x - other_x)
-                    next_y = self_y + opt.away_scale * (self_y - other_y)
-                    break
-
-            # stop car
-            stopcar()
-
-            pos_message = {}
-
-            time.sleep(1)
-
-            if turn_back:
-                self.move_to(next_x, next_y, 1)
+        if turn_back:
+            self.move_to(next_x, next_y, 1)
 
     def calculate_near(self, positions):
         self_x = positions['self'][0]

@@ -1,9 +1,10 @@
 {
-    "corner1": [0.0, 0.0],
-    "corner2": [10.0, 10.0],
+    "id": "osoyoo",
+    "corner1": [0.0, 202.0],
+    "corner2": [0.0, 398.0],
     "update_time": 0.5,
     "minimal_dist": 1.0,
     "away_scale": 0.8,
-    "angular_speed": 0.3,
+    "angular_speed": 2.5,
     "rotate_scale": 1.2
 }
